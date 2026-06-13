@@ -22,23 +22,34 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 NO_ANSWER_MESSAGE = "I cannot answer this based on the provided document."
 
-SYSTEM_PROMPT = f"""You are an enterprise AI assistant. You MUST use ONLY the provided context to answer the question. You are strictly forbidden from using outside knowledge. If the answer cannot be found within the context below, you must reply exactly with: '{NO_ANSWER_MESSAGE}'
+SYSTEM_PROMPT = f"""You are an enterprise AI assistant that answers questions about a single uploaded document. Use the Document Overview and the Relevant Excerpts below as your ONLY sources of information — you are strictly forbidden from using outside knowledge.
 
-Context:
+Always try to give a helpful, complete answer:
+- You MAY combine, synthesize, and reason across the Document Overview and the Relevant Excerpts (for example, to summarize, compare, or describe content spanning multiple sections).
+- If the user asks for a summary, overview, or description of part of the document (e.g. "the first two chapters," "the introduction"), use whatever relevant content is available in the Overview and Excerpts to give the best possible answer, even if it does not cover that section exhaustively.
+- Only reply exactly with '{NO_ANSWER_MESSAGE}' if the Document Overview and Relevant Excerpts are about a completely different subject than what the question asks about.
+
+Document Overview:
+{{overview}}
+
+Relevant Excerpts:
 {{context}}
 
 Question: {{question}}
 
 Answer:"""
 
-prompt = PromptTemplate(template=SYSTEM_PROMPT, input_variables=["context", "question"])
+prompt = PromptTemplate(template=SYSTEM_PROMPT, input_variables=["overview", "context", "question"])
 
-RETRIEVER_K = 3
+RETRIEVER_K = 5
+SUMMARY_SAMPLE_CHUNKS = 24
+SUMMARY_SAMPLE_CHARS = 8000
 
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 vectorstore: FAISS | None = None
 retriever: EnsembleRetriever | None = None
+document_summary: str = ""
 _llm: ChatGroq | None = None
 
 
@@ -73,9 +84,34 @@ async def root():
     return {"status": "ok", "service": "Qbotica RAG API"}
 
 
+def _build_document_summary(chunks: list) -> str:
+    """Summarize a representative sample of chunks so broad/overview
+    questions ("what is this document about?", "summarize chapter 1")
+    have useful context even when no single chunk literally matches."""
+    if not chunks:
+        return ""
+
+    step = max(1, len(chunks) // SUMMARY_SAMPLE_CHUNKS)
+    sample = chunks[::step][:SUMMARY_SAMPLE_CHUNKS]
+    sample_text = "\n\n".join(c.page_content for c in sample)[:SUMMARY_SAMPLE_CHARS]
+
+    summary_prompt = (
+        "Write a concise 4-6 sentence overview of the following document. "
+        "Describe its overall topic/subject, type (e.g. novel, report, manual), "
+        "and structure if apparent. Base this only on the excerpts below.\n\n"
+        f"Excerpts:\n{sample_text}\n\nOverview:"
+    )
+
+    try:
+        response = get_llm().invoke(summary_prompt)
+        return response.content.strip()
+    except Exception:
+        return ""
+
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    global vectorstore, retriever
+    global vectorstore, retriever, document_summary
 
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -121,6 +157,11 @@ async def upload_pdf(file: UploadFile = File(...)):
         retriever = EnsembleRetriever(
             retrievers=[bm25_retriever, faiss_retriever], weights=[0.5, 0.5]
         )
+
+        # Document-level overview so broad questions (e.g. "what is this
+        # about?", "summarize the first chapters") have useful context even
+        # when no single retrieved chunk literally contains the answer.
+        document_summary = _build_document_summary(chunks)
     except HTTPException:
         raise
     except Exception as exc:
@@ -157,7 +198,8 @@ async def chat(request: ChatRequest):
         )
 
     context = "\n\n".join(context_blocks)
-    formatted_prompt = prompt.format(context=context, question=request.message)
+    overview = document_summary or "No overview available."
+    formatted_prompt = prompt.format(overview=overview, context=context, question=request.message)
 
     try:
         response = get_llm().invoke(formatted_prompt)
