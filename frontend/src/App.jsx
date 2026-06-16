@@ -4,6 +4,7 @@ import EmptyState from './components/EmptyState'
 import ChatMessage from './components/ChatMessage'
 import TypingIndicator from './components/TypingIndicator'
 import ChatInput from './components/ChatInput'
+import PdfViewerPanel from './components/PdfViewerPanel'
 import { API_BASE, STATUS } from './constants'
 
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -12,10 +13,17 @@ export default function App() {
   const [status, setStatus] = useState(STATUS.IDLE)
   const [fileName, setFileName] = useState('')
   const [chunkCount, setChunkCount] = useState(null)
+  const [docSummary, setDocSummary] = useState('')
+  const [keyTopics, setKeyTopics] = useState([])
+  const [docStats, setDocStats] = useState(null)
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [isChatLoading, setIsChatLoading] = useState(false)
   const [error, setError] = useState('')
+  const [viewerOpen, setViewerOpen] = useState(false)
+  const [viewerPage, setViewerPage] = useState(1)
+  const [viewerSnippet, setViewerSnippet] = useState('')
+  const [viewerResponse, setViewerResponse] = useState('')
 
   const fileInputRef = useRef(null)
   const messagesEndRef = useRef(null)
@@ -35,6 +43,10 @@ export default function App() {
     setError('')
     setStatus(STATUS.VECTORIZING)
     setMessages([])
+    setViewerOpen(false)
+    setDocSummary('')
+    setKeyTopics([])
+    setDocStats(null)
 
     const formData = new FormData()
     formData.append('file', file)
@@ -53,6 +65,9 @@ export default function App() {
       const data = await res.json()
       setFileName(file.name)
       setChunkCount(data.chunks_indexed ?? null)
+      setDocSummary(data.summary ?? '')
+      setKeyTopics(data.key_topics ?? [])
+      setDocStats(data.stats ?? null)
       setStatus(STATUS.ACTIVE)
     } catch (err) {
       setStatus(STATUS.IDLE)
@@ -68,6 +83,11 @@ export default function App() {
     const trimmed = input.trim()
     if (!trimmed || status !== STATUS.ACTIVE || isChatLoading) return
 
+    const history = messages.map((m) => ({
+      role: m.role === 'bot' ? 'assistant' : 'user',
+      content: m.content,
+    }))
+
     setMessages((prev) => [...prev, { role: 'user', content: trimmed, timestamp: timeNow() }])
     setInput('')
     setIsChatLoading(true)
@@ -77,7 +97,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify({ message: trimmed, history }),
       })
 
       if (!res.ok) {
@@ -112,6 +132,17 @@ export default function App() {
     setError('')
   }
 
+  const handleCitationClick = (page, snippet, response) => {
+    setViewerPage(page)
+    setViewerSnippet(snippet || '')
+    setViewerResponse(response || '')
+    setViewerOpen(true)
+  }
+
+  const handleTopicClick = (topic) => {
+    setInput(`Tell me about ${topic}`)
+  }
+
   const isInputDisabled = status !== STATUS.ACTIVE || isChatLoading
 
   return (
@@ -120,10 +151,14 @@ export default function App() {
         status={status}
         fileName={fileName}
         chunkCount={chunkCount}
+        docSummary={docSummary}
+        keyTopics={keyTopics}
+        docStats={docStats}
         fileInputRef={fileInputRef}
         onUploadClick={handleUploadClick}
         onFileChange={handleFileChange}
         onNewChat={handleNewChat}
+        onTopicClick={handleTopicClick}
         hasMessages={messages.length > 0}
       />
 
@@ -140,6 +175,7 @@ export default function App() {
                   content={msg.content}
                   sources={msg.sources}
                   timestamp={msg.timestamp}
+                  onCitationClick={handleCitationClick}
                 />
               ))
             )}
@@ -170,6 +206,15 @@ export default function App() {
           }
         />
       </div>
+
+      <PdfViewerPanel
+        open={viewerOpen}
+        page={viewerPage}
+        snippet={viewerSnippet}
+        response={viewerResponse}
+        fileName={fileName}
+        onClose={() => setViewerOpen(false)}
+      />
     </div>
   )
 }

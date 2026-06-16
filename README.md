@@ -1,11 +1,11 @@
 # qBotica RAG
 
-An enterprise-styled, full-stack **Retrieval-Augmented Generation (RAG)** application. Upload a PDF, and chat with an AI assistant that answers **strictly from that document** — with page/paragraph-level source citations.
+An enterprise-styled, full-stack **Retrieval-Augmented Generation (RAG)** application. Upload a PDF and chat with an AI assistant that answers **strictly from that document** — with page-level citations, an in-browser PDF viewer with paragraph highlighting, multi-turn conversation memory, and algorithmic document intelligence.
 
-| Layer    | Stack                                                                          |
-| -------- | ------------------------------------------------------------------------------ |
-| Backend  | FastAPI · LangChain · FAISS · BM25 · HuggingFace Embeddings · Groq (Llama 3.1) |
-| Frontend | React 19 · Vite · Tailwind CSS v4 · lucide-react                               |
+| Layer    | Stack                                                                                      |
+| -------- | ------------------------------------------------------------------------------------------ |
+| Backend  | FastAPI · LangChain · FAISS · BM25 · HuggingFace Embeddings · Groq (Llama 3.1) · YAKE    |
+| Frontend | React 19 · Vite · Tailwind CSS v4 · react-pdf · lucide-react                              |
 
 ---
 
@@ -20,130 +20,116 @@ An enterprise-styled, full-stack **Retrieval-Augmented Generation (RAG)** applic
 - [RAG Pipeline Details](#rag-pipeline-details)
 - [Frontend UI Overview](#frontend-ui-overview)
 - [Configuration](#configuration)
-- [Limitations & Future Improvements](#limitations--future-improvements)
+- [Limitations](#limitations)
 
 ---
 
 ## Features
 
 ### Core RAG capabilities
-- **PDF ingestion** — upload any PDF via `multipart/form-data`; it's parsed page-by-page with `PyPDFLoader`.
-- **Semantic chunking** — instead of naive fixed-size character splitting, `SemanticChunker` (LangChain Experimental) groups sentences by *embedding similarity*, so chunks break at natural topic/paragraph boundaries rather than mid-sentence.
-- **Hybrid search (dense + sparse)** — every query is run against:
-  - a **FAISS** vector index (dense, semantic similarity via `all-MiniLM-L6-v2` embeddings), and
-  - a **BM25** keyword index (sparse, exact-term/acronym/identifier matching),
 
-  fused together with an `EnsembleRetriever` (50/50 reciprocal rank fusion) to get the best of both worlds.
-- **Strict, grounded answers** — a hard system prompt forces the LLM (Groq `llama-3.1-8b-instant`) to answer *only* from retrieved context, and to reply with a fixed refusal sentence if the answer isn't present — no outside knowledge, no hallucinated facts.
-- **Source citations** — every answer (when grounded) returns the supporting chunks' metadata: page number, in-page paragraph index, and a text snippet, so users can verify exactly where an answer came from.
+- **PDF ingestion** — upload any PDF via `multipart/form-data`; parsed page-by-page with `PyPDFLoader`.
+- **Semantic chunking** — `SemanticChunker` groups sentences by embedding similarity so chunks break at natural topic boundaries, not mid-sentence.
+- **Hybrid search (dense + sparse)** — every query hits both:
+  - **FAISS** vector index (dense, semantic similarity via `all-MiniLM-L6-v2`), and
+  - **BM25** keyword index (sparse, exact-term / acronym matching),
 
-### Frontend / UX
-- **Two-pane "AI assistant" layout** — a dark navy sidebar (Knowledge Base status, upload control, tech stack badges) + a light chat workspace.
-- **Live status indicator** — `Awaiting upload` (amber) → `Vectorizing…` (animated spinner) → `Active` (pulsing green), reflecting backend processing state.
-- **Chat experience** — auto-scrolling message list, user/bot avatars, timestamps, fade-in message animations, "Synthesizing response…" typing indicator.
-- **Clickable citation chips** — expandable "Source: Page X, Paragraph Y" pills under each answer reveal the underlying text snippet.
-- **Auto-resizing input box** — multi-line composer (Enter to send, Shift+Enter for newline), disabled until a document is indexed.
-- **New Conversation** — clears the chat thread without re-uploading/re-indexing the document.
-- **Empty states** — friendly illustrations guiding the user before/after a document is indexed.
+  fused via `EnsembleRetriever` (50/50 reciprocal rank fusion, k=5).
+- **Grounded answers** — a strict system prompt forces the LLM (`llama-3.1-8b-instant`, temperature 0) to answer only from retrieved context plus a document overview; outside knowledge is forbidden.
+- **Document overview** — at upload time the LLM reads a representative sample of chunks and writes a 4–6 sentence overview, giving broad/summary questions useful context without re-indexing.
+
+### Smart semantic citations
+
+- Retrieved chunks are numbered `[0]`, `[1]`, … and injected into the prompt.
+- After answering, the LLM appends a `CITED: 0,2` line declaring exactly which excerpts it used.
+- The backend parses this line, filters sources to only those cited, and returns them — so citations are semantically relevant, not keyword-overlapping noise.
+- Out-of-scope questions (`"what's today's date?"`) get no citation badges at all.
+
+### In-browser PDF viewer with paragraph highlighting
+
+- Clicking any citation chip opens a slide-in PDF viewer (powered by `react-pdf`) that jumps directly to the cited page.
+- The text layer is scanned post-render and every span matching the retrieved chunk text or the LLM answer text is highlighted in blue — so e.g. "Ken Follett" lights up even if the name appears outside the specific retrieved chunk.
+- In-panel page navigation (previous / next) and a backdrop overlay on mobile.
+
+### Multi-turn conversation memory
+
+- The frontend sends the full conversation history (as `[{role, content}]`) with every request.
+- The backend builds a proper `[SystemMessage, HumanMessage, AIMessage, …, HumanMessage]` list for ChatGroq so the LLM retains context across the entire session.
+- "New Conversation" clears history without re-uploading the document.
+
+### Algorithmic document intelligence (no extra LLM calls)
+
+Surfaced in the sidebar immediately after upload — derived entirely from chunk text/metadata, not from any additional model call:
+
+| Signal              | Method                                                                     |
+| ------------------- | -------------------------------------------------------------------------- |
+| **Page count**      | `max(chunk.metadata["page"])` across all chunks                            |
+| **Word count**      | `len(all_text.split())`                                                    |
+| **Reading time**    | `words ÷ 250 wpm` (rounded up, minimum 1 min)                              |
+| **Key topics**      | **YAKE** (Yet Another Keyword Extractor) — statistical TF-IDF-like scoring, first 12 000 chars, up to 3-word phrases, top 10 results |
+| **Document summary** | LLM overview computed once at upload (sunk cost; no new call)             |
+
+Topic chips are clickable — clicking one pre-fills the chat input with *"Tell me about [topic]"*.
+
+### UX polish
+
+- **Live status badge** — `Awaiting upload` (amber) → `Vectorizing…` (spinner) → `Active` (pulsing green).
+- **Auto-scrolling chat** with avatars, timestamps, fade-in animations, and a typing indicator.
+- **Auto-resizing composer** — grows with content; Enter to send, Shift+Enter for newline.
+- **Collapsible document summary** — "Show summary / Hide summary" toggle in the sidebar.
 
 ---
 
 ## Architecture
 
-### High-level component diagram
+### Component diagram
 
-```mermaid
-flowchart LR
-    subgraph Browser["Frontend — React + Vite + Tailwind"]
-        UI[Chat UI]
-        Sidebar[Sidebar / Upload Control]
-    end
-
-    subgraph API["Backend — FastAPI (main.py)"]
-        Upload[POST /upload]
-        Chat[POST /chat]
-        Splitter[SemanticChunker]
-        Embedder[HuggingFace Embeddings\nall-MiniLM-L6-v2]
-        FAISSStore[(FAISS Vector Index)]
-        BM25Store[(BM25 Keyword Index)]
-        Ensemble[EnsembleRetriever\nHybrid Search]
-        Prompt[Strict System Prompt]
-        LLM[Groq LLM\nllama-3.1-8b-instant]
-    end
-
-    Sidebar -- "PDF file" --> Upload
-    Upload --> PyPDF[PyPDFLoader]
-    PyPDF --> Splitter
-    Splitter --> Embedder
-    Embedder --> FAISSStore
-    Splitter --> BM25Store
-    FAISSStore --> Ensemble
-    BM25Store --> Ensemble
-
-    UI -- "user message" --> Chat
-    Chat -- "query" --> Ensemble
-    Ensemble -- "top-k chunks + metadata" --> Prompt
-    Prompt --> LLM
-    LLM -- "answer" --> Chat
-    Chat -- "{ response, sources[] }" --> UI
+```
+Browser (React + Vite)                    Backend (FastAPI)
+─────────────────────────────────────     ──────────────────────────────────────────────
+ Sidebar                                   POST /upload
+   • Knowledge Base card                     PyPDFLoader → SemanticChunker
+   • Document Intelligence card              HF Embeddings (all-MiniLM-L6-v2)
+   • Topic chips                             FAISS index  +  BM25 index
+ Chat area                                   EnsembleRetriever (hybrid)
+   • ChatMessage + Citation chips            _build_document_summary (LLM, once)
+   • TypingIndicator                         _extract_document_intelligence (YAKE, stats)
+   • ChatInput                            POST /chat
+ PdfViewerPanel (react-pdf)                  EnsembleRetriever.invoke(query)
+   • Page jump + text highlighting           [SystemMessage + history + HumanMessage]
+                                             → ChatGroq (llama-3.1-8b-instant)
+                                             Parse "CITED: 0,2" → filter sources
+ GET /pdfs/{filename}  ←── StaticFiles mount (serves uploaded PDFs to the viewer)
 ```
 
-### Document upload (indexing) flow
+### Upload flow
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Frontend
-    participant FastAPI as FastAPI (/upload)
-    participant Loader as PyPDFLoader
-    participant Chunker as SemanticChunker
-    participant Embed as HF Embeddings
-    participant FAISS
-    participant BM25
-
-    User->>Frontend: Select PDF
-    Frontend->>FastAPI: POST /upload (multipart file)
-    FastAPI->>FastAPI: Save file to /uploads
-    FastAPI->>Loader: load(file_path)
-    Loader-->>FastAPI: pages[] (with page metadata)
-    FastAPI->>Chunker: split_documents(pages)
-    Chunker->>Embed: embed sentences (find breakpoints)
-    Embed-->>Chunker: similarity scores
-    Chunker-->>FastAPI: semantic chunks[] (+ page/paragraph metadata)
-    FastAPI->>Embed: embed_documents(chunks)
-    Embed-->>FAISS: vectors
-    FastAPI->>FAISS: build + save_local index
-    FastAPI->>BM25: build keyword index from chunks
-    FastAPI->>FastAPI: build EnsembleRetriever(BM25, FAISS)
-    FastAPI-->>Frontend: { status, filename, chunks_indexed }
-    Frontend-->>User: Status → "Active"
+```
+User selects PDF
+  → POST /upload (multipart)
+    → save to uploads/
+    → PyPDFLoader → pages[]
+    → SemanticChunker (embeds every sentence to find breakpoints)
+    → tag each chunk with page + paragraph number
+    → FAISS.from_documents() + save_local()
+    → BM25Retriever.from_documents()
+    → EnsembleRetriever(BM25 50% + FAISS 50%)
+    → _build_document_summary() — LLM overview (24 evenly-sampled chunks)
+    → _extract_document_intelligence() — YAKE topics + word/page/reading stats
+  ← { status, filename, chunks_indexed, summary, key_topics, stats }
 ```
 
-### Chat (retrieval + generation) flow
+### Chat flow
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Frontend
-    participant FastAPI as FastAPI (/chat)
-    participant Retriever as EnsembleRetriever
-    participant LLM as Groq llama-3.1-8b-instant
-
-    User->>Frontend: Type question, press Enter
-    Frontend->>FastAPI: POST /chat { message }
-    FastAPI->>Retriever: invoke(message)
-    Retriever->>Retriever: BM25.search(message) + FAISS.similarity_search(message)
-    Retriever-->>FastAPI: top-3 fused chunks (page, paragraph, text)
-    FastAPI->>FastAPI: build context blocks + strict prompt
-    FastAPI->>LLM: invoke(prompt)
-    LLM-->>FastAPI: answer text
-    alt Answer found in context
-        FastAPI-->>Frontend: { response, sources: [{label, page, paragraph, snippet}] }
-        Frontend-->>User: Render answer + citation chips
-    else Not found in context
-        FastAPI-->>Frontend: { response: "I cannot answer this based on the provided document." }
-        Frontend-->>User: Render refusal (no citations)
-    end
+```
+User types message (frontend sends full history[])
+  → POST /chat { message, history }
+    → EnsembleRetriever.invoke(message) → top-5 chunks
+    → number chunks [0]…[4] for LLM citation tracking
+    → build [SystemMessage(context + overview), *history turns, HumanMessage]
+    → ChatGroq.invoke(messages)
+    → parse "CITED: 0,2" suffix → filter sources to cited only
+  ← { response, sources[] }  (sources omitted if CITED: none)
 ```
 
 ---
@@ -152,27 +138,29 @@ sequenceDiagram
 
 ### Backend (`/backend`)
 
-| Component             | Library / Service                    | Purpose                                                              |
-| ---------------------- | ------------------------------------- | --------------------------------------------------------------------- |
-| API framework          | **FastAPI** + **Uvicorn**             | REST API, CORS, async request handling                               |
-| PDF parsing            | **pypdf** / `PyPDFLoader`             | Extracts per-page text and metadata from uploaded PDFs               |
-| Chunking               | **LangChain Experimental** `SemanticChunker` | Splits text on semantic/structural boundaries, not raw character counts |
-| Embeddings             | **HuggingFace** `sentence-transformers` (`all-MiniLM-L6-v2`) | Generates vector representations for chunks and queries |
-| Dense retrieval        | **FAISS** (`faiss-cpu`)               | Vector similarity search index                                       |
-| Sparse retrieval       | **rank-bm25** (`BM25Retriever`)       | Keyword/lexical search index                                          |
-| Hybrid retrieval       | **LangChain** `EnsembleRetriever`     | Combines FAISS + BM25 via reciprocal rank fusion                      |
-| LLM                     | **langchain-groq** → Groq Cloud (`llama-3.1-8b-instant`) | Generates grounded answers from retrieved context |
-| Config                  | **python-dotenv**                     | Loads `GROQ_API_KEY` from `.env`                                      |
+| Component            | Library / Service                                              | Purpose                                                              |
+| -------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------- |
+| API framework        | **FastAPI** + **Uvicorn**                                      | REST API, CORS middleware, static file serving (`/pdfs/`)            |
+| PDF parsing          | **pypdf** / `PyPDFLoader`                                      | Per-page text extraction with page metadata                          |
+| Semantic chunking    | **LangChain Experimental** `SemanticChunker`                   | Splits text at embedding-similarity breakpoints                      |
+| Embeddings           | **HuggingFace** `sentence-transformers` (`all-MiniLM-L6-v2`)  | Chunk and query vectors                                              |
+| Dense retrieval      | **FAISS** (`faiss-cpu`)                                        | Vector similarity index                                              |
+| Sparse retrieval     | **rank-bm25** (`BM25Retriever`)                                | Keyword / lexical index                                              |
+| Hybrid retrieval     | **LangChain** `EnsembleRetriever`                              | Fuses FAISS + BM25 via reciprocal rank fusion                        |
+| LLM                  | **langchain-groq** → Groq Cloud (`llama-3.1-8b-instant`)      | Answer generation + document summary + semantic citation declaration  |
+| Keyword extraction   | **YAKE** (`yake==0.4.8`)                                       | Statistical keyphrase extraction — no model, no API call             |
+| Config               | **python-dotenv**                                              | Loads `GROQ_API_KEY` from `.env`                                     |
 
 ### Frontend (`/frontend`)
 
-| Component        | Library                  | Purpose                                          |
-| ----------------- | ------------------------- | --------------------------------------------------- |
-| UI framework      | **React 19**              | Component-based SPA                              |
-| Build tool        | **Vite**                  | Dev server + production bundling                 |
-| Styling           | **Tailwind CSS v4**       | Utility-first styling, custom theme/fonts        |
-| Icons             | **lucide-react**          | Bot, UploadCloud, Send, Loader2, FileText, etc.  |
-| Font              | **Inter** (Google Fonts)  | Clean enterprise sans-serif typography           |
+| Component       | Library               | Purpose                                                      |
+| --------------- | --------------------- | ------------------------------------------------------------ |
+| UI framework    | **React 19**          | Component-based SPA                                          |
+| Build tool      | **Vite**              | Dev server + HMR + production bundling                       |
+| Styling         | **Tailwind CSS v4**   | Utility-first styling                                        |
+| PDF rendering   | **react-pdf**         | In-browser PDF viewer; wraps `pdfjs-dist`                    |
+| Icons           | **lucide-react**      | Bot, UploadCloud, FileText, ChevronDown, X, etc.             |
+| Font            | **Inter** (Google)    | Clean enterprise sans-serif                                  |
 
 ---
 
@@ -181,27 +169,28 @@ sequenceDiagram
 ```
 Qbotica - RAG/
 ├── backend/
-│   ├── main.py              # FastAPI app: /upload and /chat endpoints, RAG pipeline
-│   ├── requirements.txt      # Python dependencies
-│   ├── .env                  # GROQ_API_KEY (not committed)
-│   ├── uploads/               # Saved PDF uploads
-│   └── vectorstore/           # Persisted FAISS index (index.faiss / index.pkl)
+│   ├── main.py              # FastAPI app — /upload, /chat, /pdfs static mount
+│   ├── requirements.txt     # Python dependencies (incl. yake==0.4.8)
+│   ├── .env                 # GROQ_API_KEY (not committed)
+│   ├── uploads/             # Saved PDF files (served at /pdfs/<filename>)
+│   └── vectorstore/         # Persisted FAISS index (index.faiss / index.pkl)
 │
 ├── frontend/
 │   ├── index.html
-│   ├── vite.config.js         # Vite + Tailwind plugin config
+│   ├── vite.config.js
 │   └── src/
-│       ├── main.jsx
-│       ├── App.jsx            # Top-level layout & state (chat, upload, status)
-│       ├── constants.js        # API_BASE URL, STATUS enum
-│       ├── index.css           # Tailwind import, fonts, animations
+│       ├── main.jsx              # pdfjs worker setup + React root
+│       ├── App.jsx               # Top-level state & handlers
+│       ├── constants.js          # API_BASE, STATUS enum
+│       ├── index.css             # Tailwind import, fonts, animations
 │       └── components/
-│           ├── Sidebar.jsx          # Branding, knowledge base card, upload control
-│           ├── ChatMessage.jsx      # Message bubble, avatar, citations
-│           ├── ChatInput.jsx        # Auto-resizing input + send button
-│           ├── TypingIndicator.jsx  # "Synthesizing response…" indicator
-│           ├── EmptyState.jsx       # Pre/post-upload empty states
-│           └── StatusBadge.jsx      # Awaiting / Vectorizing / Active badge
+│           ├── Sidebar.jsx           # Branding, KB card, Document Intelligence card
+│           ├── ChatMessage.jsx       # Message bubble, Citation chips
+│           ├── ChatInput.jsx         # Auto-resizing textarea + send
+│           ├── PdfViewerPanel.jsx    # Slide-in PDF viewer with highlighting
+│           ├── TypingIndicator.jsx   # "Synthesizing…" indicator
+│           ├── EmptyState.jsx        # Pre/post-upload guidance
+│           └── StatusBadge.jsx       # Awaiting / Vectorizing / Active
 │
 └── README.md
 ```
@@ -211,6 +200,7 @@ Qbotica - RAG/
 ## Getting Started
 
 ### Prerequisites
+
 - Python 3.11+
 - Node.js 18+ / npm
 - A [Groq API key](https://console.groq.com/) (free tier available)
@@ -221,28 +211,26 @@ Qbotica - RAG/
 cd backend
 python -m venv venv
 
-# Activate the virtual environment
+# Activate
 venv\Scripts\activate        # Windows
-source venv/bin/activate     # macOS/Linux
+source venv/bin/activate     # macOS / Linux
 
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in `backend/`:
+Create `backend/.env`:
 
 ```env
 GROQ_API_KEY=your_groq_api_key_here
 ```
 
-Run the API:
+Start the server:
 
 ```bash
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --reload-include "main.py" --host 0.0.0.0 --port 8000
 ```
 
-The backend is now available at `http://localhost:8000`.
-
-> **Note:** The first request will download the `all-MiniLM-L6-v2` embedding model (~90 MB) from HuggingFace. Uploading a large PDF can take 1–2 minutes due to semantic chunking (it embeds every sentence to find optimal split points).
+> **Note:** The first run downloads `all-MiniLM-L6-v2` (~90 MB). Uploading a large PDF takes 1–2 minutes because `SemanticChunker` embeds every sentence to find split points, then the LLM generates a document overview.
 
 ### 2. Frontend setup
 
@@ -252,7 +240,9 @@ npm install
 npm run dev
 ```
 
-The app is now available at `http://localhost:5173`. Make sure the backend is running on port 8000 (the frontend is hardcoded to call `http://localhost:8000` — see `src/constants.js`).
+Open [http://localhost:5173](http://localhost:5173). The frontend calls `http://localhost:8000` by default (see `src/constants.js`).
+
+> **Important:** After every backend restart you must re-upload the PDF. The FAISS index is persisted to disk but the BM25 retriever, EnsembleRetriever, and `document_summary` live in process memory and are cleared on restart.
 
 ---
 
@@ -260,110 +250,122 @@ The app is now available at `http://localhost:5173`. Make sure the backend is ru
 
 ### `GET /`
 Health check.
-
 ```json
 { "status": "ok", "service": "Qbotica RAG API" }
 ```
 
-### `POST /upload`
-Uploads a PDF, builds the semantic chunks, and (re)builds the hybrid retriever. **Replaces** any previously indexed document.
+### `GET /pdfs/{filename}`
+Serves the uploaded PDF file (used by the in-browser PDF viewer).
 
-- **Request**: `multipart/form-data`, field `file` (must be a `.pdf`)
+### `POST /upload`
+Processes a PDF and builds the hybrid retriever + document intelligence.
+
+- **Request**: `multipart/form-data`, field `file` (`.pdf` only)
 - **Response** `200 OK`:
   ```json
   {
     "status": "success",
     "filename": "Eye of the Needle.pdf",
-    "chunks_indexed": 741
+    "chunks_indexed": 741,
+    "summary": "Eye of the Needle is a World War II espionage thriller by Ken Follett...",
+    "key_topics": ["German Spy", "World War Ii", "Scottish Island", "..."],
+    "stats": {
+      "pages": 276,
+      "words": 98432,
+      "reading_time_minutes": 394
+    }
   }
   ```
-- **Errors**:
-  - `400` — file isn't a PDF, or no extractable text was found
-  - `500` — PDF processing failed
+- **Errors**: `400` (not a PDF / no text), `500` (processing failure)
 
 ### `POST /chat`
-Answers a question using only the currently indexed document.
+Answers a question grounded strictly in the uploaded document, with conversation history support.
 
 - **Request**:
   ```json
-  { "message": "What rank was someone promoted to?" }
+  {
+    "message": "Who is the author?",
+    "history": [
+      { "role": "user", "content": "What is this book about?" },
+      { "role": "assistant", "content": "Eye of the Needle is a WWII thriller..." }
+    ]
+  }
   ```
-- **Response** `200 OK` (grounded answer):
+- **Response** `200 OK` (with citations):
   ```json
   {
-    "response": "Lieutenant-colonel.",
+    "response": "The author of the novel is Ken Follett.",
     "sources": [
       {
-        "label": "Page 60, Paragraph 1",
-        "page": 60,
+        "label": "Page 273, Paragraph 1",
+        "page": 273,
         "paragraph": 1,
-        "snippet": "“Oh, no, sir. You’ve been promoted twice in your absence..."
+        "snippet": "KEN FOLLETT'S career as a bestselling author has spanned..."
       }
     ]
   }
   ```
-- **Response** `200 OK` (no answer in document — `sources` omitted):
+- **Response** `200 OK` (out-of-scope — no `sources` key):
   ```json
   { "response": "I cannot answer this based on the provided document." }
   ```
-- **Errors**:
-  - `400` — no document has been uploaded yet
-  - `500` — `GROQ_API_KEY` missing or LLM request failed
+- **Errors**: `400` (no document uploaded), `500` (missing API key / LLM failure)
 
 ---
 
 ## RAG Pipeline Details
 
-1. **Load** — `PyPDFLoader` extracts one `Document` per page, each tagged with `metadata.page` (0-indexed).
-2. **Semantic chunk** — `SemanticChunker(embeddings)` splits each page's text into chunks at points where consecutive sentences' embeddings diverge most (a "breakpoint"), preserving coherent thoughts/paragraphs.
-3. **Tag paragraphs** — chunks are numbered sequentially within their source page (`metadata.paragraph`), enabling human-readable citations like *"Page 4, Paragraph 2"*.
+1. **Load** — `PyPDFLoader` extracts one `Document` per page with `metadata.page` (0-indexed).
+2. **Semantic chunk** — `SemanticChunker(embeddings)` splits pages where consecutive sentence embeddings diverge most, preserving coherent paragraphs.
+3. **Tag paragraphs** — chunks are numbered sequentially within each page (`metadata.paragraph`), enabling "Page 4, Paragraph 2" citations.
 4. **Index (dual)**:
-   - **FAISS**: chunks are embedded with `all-MiniLM-L6-v2` and stored in a vector index (persisted to `backend/vectorstore/`).
-   - **BM25**: the same chunks are indexed for lexical/keyword search.
-5. **Hybrid retrieval** — on each chat query, `EnsembleRetriever` queries both indexes (k=3 each) and fuses the ranked results (50% BM25 / 50% FAISS) via reciprocal rank fusion; the top 3 fused results are kept.
-6. **Strict prompting** — retrieved chunks are wrapped with their `[Page X, Paragraph Y]` label and inserted into a system prompt that:
-   - forbids using outside knowledge,
-   - requires answers to be derived solely from the provided context,
-   - mandates an exact refusal string (`"I cannot answer this based on the provided document."`) when the answer isn't present.
-7. **Citations** — if the LLM's answer is *not* the refusal string, the backend attaches the `sources` array (label, page, paragraph, snippet) so the frontend can render verifiable citation chips.
+   - **FAISS**: chunks are embedded with `all-MiniLM-L6-v2`, stored in a vector index persisted to `backend/vectorstore/`.
+   - **BM25**: same chunks indexed for lexical search (in-memory, rebuilt on each upload).
+5. **Document overview** — `_build_document_summary()` samples 24 evenly-spaced chunks (up to 8 000 chars total), sends them to the LLM once, and stores the 4–6 sentence overview. Broad questions like "what is this book about?" use this rather than failing to find a single matching chunk.
+6. **Document intelligence** — `_extract_document_intelligence()` runs entirely on text/metadata without any model call: YAKE statistical keyphrase extraction on the first 12 000 chars, plus word count, page count, and reading time.
+7. **Hybrid retrieval** — `EnsembleRetriever` queries both indexes (k=5) and fuses ranked results via reciprocal rank fusion (50% BM25 / 50% FAISS).
+8. **Semantic citation** — retrieved chunks are numbered `[0]`…`[4]` in the prompt. The system instructs the LLM to append `CITED: 0,2` (or `CITED: none`). The backend parses this suffix and returns only the declared sources.
+9. **Multi-turn memory** — the frontend sends `history[]` with every request. The backend builds `[SystemMessage, *history_turns, HumanMessage]` so the LLM tracks context across the conversation.
 
 ---
 
 ## Frontend UI Overview
 
-- **Sidebar** (`Sidebar.jsx`): qBotica branding, a "Knowledge Base" card showing the live `StatusBadge`, the indexed filename + chunk count, the upload/replace button (hidden file input, PDF only), a "New Conversation" reset, and a footer of tech badges.
-- **Chat area** (`App.jsx` + `ChatMessage.jsx`): scrollable message list with avatars, timestamps, and fade-in animations. Bot messages with grounded answers show clickable citation chips (`Citation` component) that expand to reveal the source text snippet.
-- **Typing indicator** (`TypingIndicator.jsx`): shown while waiting for `/chat` to respond.
-- **Input console** (`ChatInput.jsx`): auto-growing textarea + send button, disabled until the knowledge base status is `Active`.
-- **Empty states** (`EmptyState.jsx`): contextual guidance — "upload a document" before indexing, "ask away" once a document is active.
+| Component             | File                   | Description                                                                                         |
+| --------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- |
+| **App**               | `App.jsx`              | Owns all state: status, fileName, messages, history, PDF viewer, document intelligence data         |
+| **Sidebar**           | `Sidebar.jsx`          | Knowledge Base card (status badge, file info, upload button) + Document Intelligence card (stats, collapsible summary, topic chips) |
+| **ChatMessage**       | `ChatMessage.jsx`      | Message bubble with avatar, timestamp, and expandable `Citation` chips that open the PDF viewer     |
+| **PdfViewerPanel**    | `PdfViewerPanel.jsx`   | Slide-in panel with `react-pdf` `<Document>` + `<Page>`, page navigation, and post-render text-layer highlight injection |
+| **ChatInput**         | `ChatInput.jsx`        | Auto-resizing `<textarea>`, send button, disabled until status is `Active`                          |
+| **TypingIndicator**   | `TypingIndicator.jsx`  | Animated dots while `/chat` is in-flight                                                            |
+| **EmptyState**        | `EmptyState.jsx`       | Contextual guidance — "upload a document" / "ask away"                                              |
+| **StatusBadge**       | `StatusBadge.jsx`      | `Awaiting upload` (amber) / `Vectorizing…` (spinning) / `Active` (pulsing green)                  |
 
-### Color & branding theme
+### PDF highlighting
 
-| Token            | Value      | Usage                                  |
-| ----------------- | ---------- | ----------------------------------------- |
-| Deep navy         | `#0a192f`  | Sidebar background, user message bubbles |
-| Electric blue     | `blue-500` / `blue-600` | Accents, buttons, links, avatars |
-| Crisp white       | `white`    | Bot message bubbles, main background     |
-| Font              | `Inter`    | Headings & body text                     |
+After `react-pdf` renders the text layer, `applyHighlight()` scans every `.react-pdf__Page__textContent span`, normalises whitespace, and blue-highlights any span whose text appears in either the retrieved chunk snippet **or** the LLM's answer. This means named entities that appear in the answer (e.g. "Ken Follett") are highlighted even if they fall outside the specific cited chunk.
 
 ---
 
 ## Configuration
 
-| Variable          | Location               | Description                                  |
-| ------------------ | ----------------------- | ----------------------------------------------- |
-| `GROQ_API_KEY`     | `backend/.env`          | Required for `/chat` to call the Groq LLM      |
-| `API_BASE`         | `frontend/src/constants.js` | Backend URL the frontend calls (default `http://localhost:8000`) |
-| `RETRIEVER_K`      | `backend/main.py`       | Number of chunks retrieved per query (default `3`) |
-| LLM model          | `backend/main.py` → `get_llm()` | Groq model name (`llama-3.1-8b-instant`) |
-| Embedding model    | `backend/main.py`       | HuggingFace model (`all-MiniLM-L6-v2`)         |
+| Variable                | Location                    | Default                     | Description                                        |
+| ----------------------- | --------------------------- | --------------------------- | -------------------------------------------------- |
+| `GROQ_API_KEY`          | `backend/.env`              | —                           | Required to call the Groq LLM                      |
+| `API_BASE`              | `frontend/src/constants.js` | `http://localhost:8000`     | Backend URL called by the frontend                 |
+| `RETRIEVER_K`           | `backend/main.py`           | `5`                         | Chunks retrieved per query from each index         |
+| `SUMMARY_SAMPLE_CHUNKS` | `backend/main.py`           | `24`                        | Chunks sampled for the document overview           |
+| `SUMMARY_SAMPLE_CHARS`  | `backend/main.py`           | `8000`                      | Max chars sent to LLM for the overview             |
+| LLM model               | `backend/main.py`           | `llama-3.1-8b-instant`      | Groq model used for answers + document summary     |
+| Embedding model         | `backend/main.py`           | `all-MiniLM-L6-v2`          | HuggingFace model for chunk + query vectors        |
 
 ---
 
-## Limitations & Future Improvements
+## Limitations
 
-- **Single active document** — uploading a new PDF replaces the previous index (no multi-document/session support).
-- **In-memory retriever** — the BM25 index and `EnsembleRetriever` are rebuilt on each upload and live only in process memory; restarting the backend requires re-uploading the PDF (the FAISS index is persisted to disk, but BM25 is not).
-- **Upload latency** — `SemanticChunker` embeds every sentence to find breakpoints, which can take 1–2 minutes for large PDFs.
-- **No authentication** — CORS is open to all origins; not intended for production deployment as-is.
-- **Possible enhancements**: multi-document knowledge bases, persistent BM25/session storage, streaming LLM responses, PDF preview with highlighted citation regions, conversation history persistence.
+- **Single active document** — uploading a new PDF replaces the previous index; no multi-document support.
+- **In-memory BM25** — the BM25 retriever is rebuilt on each upload and lives in process memory. After a backend restart the PDF must be re-uploaded (the FAISS index is persisted to disk, but BM25 is not).
+- **Upload latency** — `SemanticChunker` embeds every sentence to detect breakpoints; large PDFs (200+ pages) can take 1–2 minutes.
+- **No authentication** — CORS is open to all origins. Not intended for production deployment as-is.
+- **pdfjs worker** — `react-pdf` requires the `pdfjs-dist` web worker to be explicitly set in `main.jsx`; the worker URL is resolved at Vite build time via `new URL(...)`.

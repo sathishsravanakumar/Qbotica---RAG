@@ -1,14 +1,16 @@
 import os
 import shutil
 
+import yake
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from langchain.retrievers import EnsembleRetriever
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.retrievers import BM25Retriever
-from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -21,25 +23,6 @@ VECTORSTORE_DIR = "vectorstore"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 NO_ANSWER_MESSAGE = "I cannot answer this based on the provided document."
-
-SYSTEM_PROMPT = f"""You are an enterprise AI assistant that answers questions about a single uploaded document. Use the Document Overview and the Relevant Excerpts below as your ONLY sources of information — you are strictly forbidden from using outside knowledge.
-
-Always try to give a helpful, complete answer:
-- You MAY combine, synthesize, and reason across the Document Overview and the Relevant Excerpts (for example, to summarize, compare, or describe content spanning multiple sections).
-- If the user asks for a summary, overview, or description of part of the document (e.g. "the first two chapters," "the introduction"), use whatever relevant content is available in the Overview and Excerpts to give the best possible answer, even if it does not cover that section exhaustively.
-- Only reply exactly with '{NO_ANSWER_MESSAGE}' if the Document Overview and Relevant Excerpts are about a completely different subject than what the question asks about.
-
-Document Overview:
-{{overview}}
-
-Relevant Excerpts:
-{{context}}
-
-Question: {{question}}
-
-Answer:"""
-
-prompt = PromptTemplate(template=SYSTEM_PROMPT, input_variables=["overview", "context", "question"])
 
 RETRIEVER_K = 5
 SUMMARY_SAMPLE_CHUNKS = 24
@@ -74,9 +57,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/pdfs", StaticFiles(directory=UPLOAD_DIR), name="pdfs")
+
 
 class ChatRequest(BaseModel):
     message: str
+    history: list[dict] | None = None
 
 
 @app.get("/")
@@ -107,6 +93,31 @@ def _build_document_summary(chunks: list) -> str:
         return response.content.strip()
     except Exception:
         return ""
+
+
+def _extract_document_intelligence(chunks: list) -> dict:
+    """Derive document stats and key topics algorithmically — no LLM call.
+
+    Uses YAKE (statistical keyword extraction) on a text sample and simple
+    word/page counting on the full chunk list.
+    """
+    all_text = " ".join(c.page_content for c in chunks)
+    total_words = len(all_text.split())
+    page_count = max((c.metadata.get("page", 0) for c in chunks), default=0) + 1
+    reading_time = max(1, round(total_words / 250))
+
+    # YAKE: purely statistical, no model — n=3 allows up to 3-word phrases
+    extractor = yake.KeywordExtractor(lan="en", n=3, dedupLim=0.7, top=10, features=None)
+    raw = extractor.extract_keywords(all_text[:12000])
+    # Lower YAKE score = more relevant; capitalise for display
+    topics = [kw.strip().title() for kw, _ in raw]
+
+    return {
+        "total_words": total_words,
+        "page_count": page_count,
+        "reading_time_minutes": reading_time,
+        "key_topics": topics,
+    }
 
 
 @app.post("/upload")
@@ -162,6 +173,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         # about?", "summarize the first chapters") have useful context even
         # when no single retrieved chunk literally contains the answer.
         document_summary = _build_document_summary(chunks)
+        doc_intelligence = _extract_document_intelligence(chunks)
     except HTTPException:
         raise
     except Exception as exc:
@@ -171,6 +183,13 @@ async def upload_pdf(file: UploadFile = File(...)):
         "status": "success",
         "filename": file.filename,
         "chunks_indexed": len(chunks),
+        "summary": document_summary,
+        "key_topics": doc_intelligence["key_topics"],
+        "stats": {
+            "pages": doc_intelligence["page_count"],
+            "words": doc_intelligence["total_words"],
+            "reading_time_minutes": doc_intelligence["reading_time_minutes"],
+        },
     }
 
 
@@ -183,11 +202,12 @@ async def chat(request: ChatRequest):
 
     context_blocks = []
     sources = []
-    for doc in docs:
+    for i, doc in enumerate(docs):
         page = doc.metadata.get("page", 0) + 1
         paragraph = doc.metadata.get("paragraph", 1)
         label = f"Page {page}, Paragraph {paragraph}"
-        context_blocks.append(f"[{label}]\n{doc.page_content}")
+        # Number each excerpt so the LLM can reference it by index
+        context_blocks.append(f"[{i}] [{label}]\n{doc.page_content}")
         sources.append(
             {
                 "label": label,
@@ -199,16 +219,56 @@ async def chat(request: ChatRequest):
 
     context = "\n\n".join(context_blocks)
     overview = document_summary or "No overview available."
-    formatted_prompt = prompt.format(overview=overview, context=context, question=request.message)
+
+    system_content = (
+        "You are an enterprise AI assistant that answers questions about a single uploaded document. "
+        "Use the Document Overview and Relevant Excerpts below as your ONLY sources of information — "
+        "you are strictly forbidden from using outside knowledge.\n\n"
+        "Always try to give a helpful, complete answer. You MAY combine, synthesize, and reason across "
+        "the Document Overview and Excerpts (e.g. to summarize, compare, or describe content spanning "
+        "multiple sections). If asked for a summary of a section, give your best answer from available context. "
+        f"Only reply exactly with '{NO_ANSWER_MESSAGE}' if the Overview and Excerpts are completely unrelated "
+        "to the question's subject.\n\n"
+        "After your answer, on a new line write exactly:\n"
+        "CITED: <comma-separated excerpt numbers whose content you actually used, e.g. 0,2>\n"
+        "If none of the numbered excerpts contributed to your answer, write: CITED: none\n\n"
+        f"Document Overview:\n{overview}\n\n"
+        f"Relevant Excerpts:\n{context}"
+    )
+
+    msgs = [SystemMessage(content=system_content)]
+    for turn in (request.history or []):
+        if turn.get("role") == "user":
+            msgs.append(HumanMessage(content=turn["content"]))
+        else:
+            msgs.append(AIMessage(content=turn["content"]))
+    msgs.append(HumanMessage(content=request.message))
 
     try:
-        response = get_llm().invoke(formatted_prompt)
+        response = get_llm().invoke(msgs)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"LLM request failed: {exc}") from exc
 
-    answer = response.content
+    raw = response.content
+
+    # Parse the LLM-declared citation indices from the trailing "CITED: ..." line
+    cited_indices: set[int] = set()
+    if "\nCITED:" in raw:
+        answer, cited_part = raw.rsplit("\nCITED:", 1)
+        answer = answer.strip()
+        cited_str = cited_part.strip()
+        if cited_str.lower() != "none":
+            for token in cited_str.split(","):
+                try:
+                    cited_indices.add(int(token.strip()))
+                except ValueError:
+                    pass
+    else:
+        answer = raw.strip()
+
     result = {"response": answer}
-    if answer.strip() != NO_ANSWER_MESSAGE:
-        result["sources"] = sources
+    # Only attach citations when the LLM explicitly referenced specific excerpts
+    if cited_indices:
+        result["sources"] = [s for i, s in enumerate(sources) if i in cited_indices]
 
     return result

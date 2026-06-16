@@ -1,17 +1,40 @@
-import { Bot, FileText, Loader2, RotateCcw, UploadCloud } from 'lucide-react'
+import { useState } from 'react'
+import { Bot, ChevronDown, FileText, Loader2, RotateCcw, UploadCloud } from 'lucide-react'
 import StatusBadge from './StatusBadge'
 import { STATUS } from '../constants'
 
 const TECH_BADGES = ['LangChain', 'FAISS', 'BM25', 'Groq Llama 3.1']
 
+function CollapsibleSummary({ summary }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((p) => !p)}
+        className="flex items-center gap-1 text-xs text-slate-400 transition-colors hover:text-slate-200"
+      >
+        <ChevronDown size={12} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+        {open ? 'Hide summary' : 'Show summary'}
+      </button>
+      {open && (
+        <p className="mt-2 text-xs leading-relaxed text-slate-300">{summary}</p>
+      )}
+    </div>
+  )
+}
+
 export default function Sidebar({
   status,
   fileName,
   chunkCount,
+  docSummary,
+  keyTopics,
+  docStats,
   fileInputRef,
   onUploadClick,
   onFileChange,
   onNewChat,
+  onTopicClick,
   hasMessages,
 }) {
   return (
@@ -29,7 +52,7 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 pb-6">
+      <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-4">
         {/* Knowledge base card */}
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-inner">
           <div className="mb-3 flex items-center justify-between">
@@ -78,10 +101,51 @@ export default function Sidebar({
           />
         </div>
 
+        {/* Document Intelligence card */}
+        {status === STATUS.ACTIVE && (docSummary || keyTopics.length > 0 || docStats) && (
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+              Document Intelligence
+            </p>
+
+            {/* Reading stats */}
+            {docStats && (
+              <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-slate-300">
+                <span>{docStats.pages.toLocaleString()} pages</span>
+                <span className="text-slate-500">·</span>
+                <span>{docStats.words.toLocaleString()} words</span>
+                <span className="text-slate-500">·</span>
+                <span>~{docStats.reading_time_minutes} min read</span>
+              </div>
+            )}
+
+            {/* Collapsible summary */}
+            {docSummary && <CollapsibleSummary summary={docSummary} />}
+
+            {/* Key topic chips — clicking pre-fills the chat input */}
+            {keyTopics.length > 0 && (
+              <div>
+                <p className="mb-1.5 text-[10px] uppercase tracking-widest text-slate-500">Key Topics</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {keyTopics.map((topic) => (
+                    <button
+                      key={topic}
+                      onClick={() => onTopicClick(topic)}
+                      className="rounded-full bg-blue-500/20 px-2.5 py-1 text-[11px] font-medium text-blue-300 transition-colors hover:bg-blue-500/40 hover:text-blue-100"
+                    >
+                      {topic}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {hasMessages && (
           <button
             onClick={onNewChat}
-            className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 px-4 py-2.5 text-sm font-medium text-slate-300 transition-colors hover:border-white/20 hover:bg-white/5 hover:text-white"
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 px-4 py-2.5 text-sm font-medium text-slate-300 transition-colors hover:border-white/20 hover:bg-white/5 hover:text-white"
           >
             <RotateCcw size={14} />
             New Conversation

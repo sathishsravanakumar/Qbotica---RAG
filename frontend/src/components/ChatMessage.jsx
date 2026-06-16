@@ -13,13 +13,16 @@ function Avatar({ isUser }) {
   )
 }
 
-function Citation({ source }) {
+function Citation({ source, onPageClick, responseText }) {
   const [open, setOpen] = useState(false)
 
   return (
     <div>
       <button
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => {
+          setOpen((prev) => !prev)
+          onPageClick?.(source.page, source.snippet, responseText)
+        }}
         className="flex items-center gap-1.5 rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-600 transition-colors hover:border-blue-200 hover:bg-blue-100"
       >
         <FileText size={12} />
@@ -35,7 +38,7 @@ function Citation({ source }) {
   )
 }
 
-export default function ChatMessage({ role, content, sources, timestamp }) {
+export default function ChatMessage({ role, content, sources, timestamp, onCitationClick }) {
   const isUser = role === 'user'
 
   return (
@@ -55,7 +58,7 @@ export default function ChatMessage({ role, content, sources, timestamp }) {
         {sources?.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {sources.map((source, idx) => (
-              <Citation key={idx} source={source} />
+              <Citation key={idx} source={source} onPageClick={onCitationClick} responseText={content} />
             ))}
           </div>
         )}

@@ -11,3 +11,4 @@ faiss-cpu==1.9.0.post1
 pypdf==5.1.0
 sentence-transformers==3.3.1
 rank-bm25==0.2.2
+yake==0.4.8
