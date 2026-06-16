@@ -71,9 +71,6 @@ async def root():
 
 
 def _build_document_summary(chunks: list) -> str:
-    """Summarize a representative sample of chunks so broad/overview
-    questions ("what is this document about?", "summarize chapter 1")
-    have useful context even when no single chunk literally matches."""
     if not chunks:
         return ""
 
@@ -96,11 +93,6 @@ def _build_document_summary(chunks: list) -> str:
 
 
 def _extract_document_intelligence(chunks: list) -> dict:
-    """Derive document stats and key topics algorithmically — no LLM call.
-
-    Uses YAKE (statistical keyword extraction) on a text sample and simple
-    word/page counting on the full chunk list.
-    """
     all_text = " ".join(c.page_content for c in chunks)
     total_words = len(all_text.split())
     page_count = max((c.metadata.get("page", 0) for c in chunks), default=0) + 1
@@ -138,40 +130,29 @@ async def upload_pdf(file: UploadFile = File(...)):
         loader = PyPDFLoader(file_path)
         pages = loader.load()
 
-        # Semantic chunking: split on meaning/structural boundaries instead of
-        # fixed character counts, so a paragraph or thought is never cut in half.
         splitter = SemanticChunker(embeddings)
         chunks = splitter.split_documents(pages)
 
         if not chunks:
             raise HTTPException(status_code=400, detail="No extractable text found in the PDF.")
 
-        # Number chunks within each page so citations can reference
-        # "Page X, Paragraph Y".
         page_paragraph_counts: dict[int, int] = {}
         for chunk in chunks:
             page = chunk.metadata.get("page", 0)
             page_paragraph_counts[page] = page_paragraph_counts.get(page, 0) + 1
             chunk.metadata["paragraph"] = page_paragraph_counts[page]
 
-        # Dense retrieval (FAISS vector similarity).
         vectorstore = FAISS.from_documents(chunks, embeddings)
         vectorstore.save_local(VECTORSTORE_DIR)
         faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": RETRIEVER_K})
 
-        # Sparse retrieval (BM25 keyword matching) for exact terms,
-        # acronyms, and identifiers that embeddings can miss.
         bm25_retriever = BM25Retriever.from_documents(chunks)
         bm25_retriever.k = RETRIEVER_K
 
-        # Hybrid search: combine both via reciprocal rank fusion.
         retriever = EnsembleRetriever(
             retrievers=[bm25_retriever, faiss_retriever], weights=[0.5, 0.5]
         )
 
-        # Document-level overview so broad questions (e.g. "what is this
-        # about?", "summarize the first chapters") have useful context even
-        # when no single retrieved chunk literally contains the answer.
         document_summary = _build_document_summary(chunks)
         doc_intelligence = _extract_document_intelligence(chunks)
     except HTTPException:
@@ -206,7 +187,6 @@ async def chat(request: ChatRequest):
         page = doc.metadata.get("page", 0) + 1
         paragraph = doc.metadata.get("paragraph", 1)
         label = f"Page {page}, Paragraph {paragraph}"
-        # Number each excerpt so the LLM can reference it by index
         context_blocks.append(f"[{i}] [{label}]\n{doc.page_content}")
         sources.append(
             {
@@ -251,7 +231,6 @@ async def chat(request: ChatRequest):
 
     raw = response.content
 
-    # Parse the LLM-declared citation indices from the trailing "CITED: ..." line
     cited_indices: set[int] = set()
     if "\nCITED:" in raw:
         answer, cited_part = raw.rsplit("\nCITED:", 1)
@@ -267,7 +246,6 @@ async def chat(request: ChatRequest):
         answer = raw.strip()
 
     result = {"response": answer}
-    # Only attach citations when the LLM explicitly referenced specific excerpts
     if cited_indices:
         result["sources"] = [s for i, s in enumerate(sources) if i in cited_indices]
 
